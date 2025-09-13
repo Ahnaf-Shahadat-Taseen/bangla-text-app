@@ -1,4 +1,5 @@
+python==3.11
 streamlit
 pandas
-pyspark==3.5.0 
+pyspark==3.5.0
 plotly
