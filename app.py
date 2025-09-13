@@ -1,20 +1,8 @@
-# app.py (Definitive Version with Correct IP Address)
+# app.py (Definitive Version with Memory Fix for Streamlit Cloud)
 
 import os
 import streamlit as st
 import pandas as pd
-
-# Forcefully Set Hadoop Home and System Properties
-hadoop_home_path = r"C:\hadoop"
-os.environ["HADOOP_HOME"] = hadoop_home_path
-os.environ["PATH"] += f";{os.path.join(hadoop_home_path, 'bin')}"
-
-# Set PYSPARK_PYTHON to your python executable
-# Find this by running 'where python' in your cmd
-python_executable_path = "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python311\\python.exe" #<-- CHANGE THIS IF YOURS IS DIFFERENT
-os.environ["PYSPARK_PYTHON"] = python_executable_path
-
-
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf
 from pyspark.sql.types import StringType
@@ -50,13 +38,11 @@ def load_spark_assets():
     model_path = os.path.join(base_path, "final_minhash_lsh_model")
     data_path = os.path.join(base_path, "clustered_app_data")
     
-    # --- Final Fix: Correct IP address and add memory config ---
+    # --- Final Fix for Streamlit Cloud: Reduce driver memory request ---
     spark = SparkSession.builder \
         .appName("WebAppLoaderFinal") \
         .master("local[*]") \
-        .config("spark.driver.host", "127.0.0.1") \
-        .config("spark.driver.memory", "4g") \
-        .config("spark.driver.extraJavaOptions", f"-Dhadoop.home.dir={hadoop_home_path}") \
+        .config("spark.driver.memory", "700m") \
         .getOrCreate()
         
     model = MinHashLSHModel.load(model_path)
