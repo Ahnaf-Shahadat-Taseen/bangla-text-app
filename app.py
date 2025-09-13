@@ -1,15 +1,14 @@
-# app.py (Definitive Version with Memory Fix for Streamlit Cloud)
+# app.py (Final, Spark-Free Version for Streamlit Cloud)
 
 import os
 import streamlit as st
 import pandas as pd
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf
-from pyspark.sql.types import StringType
-from pyspark.ml.feature import RegexTokenizer, HashingTF, MinHashLSHModel
+from sklearn.feature_extraction.text import HashingVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 import unicodedata
 import string
 import plotly.express as px
+import numpy as np
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -28,42 +27,36 @@ def clean_text(text):
     text = text.replace(bangla_punc, "")
     return ' '.join(text.split())
 
-# --- Spark Session and Model Loading ---
+# --- Load Data and Create Feature Vectors (Cached for performance) ---
 @st.cache_resource
-def load_spark_assets():
+def load_assets():
     """
-    Starts Spark, loads data, and re-creates the feature vectors needed by the model.
+    Loads the data with Pandas and creates feature vectors using Scikit-learn.
+    This is much faster and more memory-efficient than Spark for an app.
     """
     base_path = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(base_path, "final_minhash_lsh_model")
     data_path = os.path.join(base_path, "clustered_app_data")
     
-    # --- Final Fix for Streamlit Cloud: Reduce driver memory request ---
-    spark = SparkSession.builder \
-        .appName("WebAppLoaderFinal") \
-        .master("local[*]") \
-        .config("spark.driver.memory", "700m") \
-        .getOrCreate()
-        
-    model = MinHashLSHModel.load(model_path)
-    df_app_raw = pd.read_parquet(data_path)
-    spark_df_app_raw = spark.createDataFrame(df_app_raw)
+    # Load the data using pandas
+    df_app = pd.read_parquet(data_path)
     
-    # Re-create the 'features' column
-    clean_text_udf = udf(clean_text, StringType())
-    df_cleaned = spark_df_app_raw.withColumn("cleaned_text", clean_text_udf(col("article")))
-    tokenizer = RegexTokenizer(inputCol="cleaned_text", outputCol="tokens", pattern="\\s+")
-    df_tokenized = tokenizer.transform(df_cleaned)
-    hashingTF = HashingTF(inputCol="tokens", outputCol="features", numFeatures=20000)
-    df_vectorized = hashingTF.transform(df_tokenized)
+    # Clean the articles
+    df_app['cleaned_text'] = df_app['article'].apply(clean_text)
     
-    return spark, model, df_app_raw, df_vectorized
+    # Create feature vectors using the same logic as HashingTF
+    # This vectorizer will be used for both the dataset and user queries
+    vectorizer = HashingVectorizer(n_features=20000, alternate_sign=False)
+    
+    # Transform all articles into a matrix of feature vectors
+    doc_vectors = vectorizer.fit_transform(df_app['cleaned_text'])
+    
+    return df_app, vectorizer, doc_vectors
 
-spark, model, df_app, spark_df_app_with_features = load_spark_assets()
+df_app, vectorizer, doc_vectors = load_assets()
 
 # --- UI Layout ---
 st.title("🔎 Bangla News Article Similarity Search Engine")
-st.markdown("Enter a Bangla sentence or article below to find the most similar articles.")
+st.markdown("Enter a Bangla sentence or article below to find the most similar news articles.")
 
 st.header("Find Similar Articles")
 query_text = st.text_area("Enter your text here:", height=150)
@@ -72,30 +65,38 @@ k_neighbors = st.slider("Number of similar articles to find:", 1, 10, 3)
 if st.button("Search"):
     if query_text:
         with st.spinner("Processing your text and searching for similar articles..."):
-            query_df = spark.createDataFrame([(1, query_text)], ["id", "text"])
+            # 1. Clean the user's query
+            cleaned_query = clean_text(query_text)
             
-            clean_text_udf = udf(clean_text, StringType())
-            query_cleaned = query_df.withColumn("cleaned_text", clean_text_udf(col("text")))
-            tokenizer = RegexTokenizer(inputCol="cleaned_text", outputCol="tokens", pattern="\\s+")
-            query_tokenized = tokenizer.transform(query_cleaned)
-            hashingTF = HashingTF(inputCol="tokens", outputCol="features", numFeatures=20000)
-            query_vectorized = hashingTF.transform(query_tokenized)
+            # 2. Transform the query into a vector using the SAME vectorizer
+            query_vector = vectorizer.transform([cleaned_query])
             
-            result_df = model.approxNearestNeighbors(spark_df_app_with_features, query_vectorized.head().features, k_neighbors)
+            # 3. Calculate cosine similarity between the query and all articles
+            similarities = cosine_similarity(query_vector, doc_vectors).flatten()
             
+            # 4. Get the indices of the top N most similar articles
+            # We use argsort to get indices, then reverse and take the top N
+            top_indices = np.argsort(similarities)[-k_neighbors:][::-1]
+
+            # --- Display Results ---
             st.success(f"Found the top {k_neighbors} most similar articles!")
-            results = result_df.collect()
             
-            for i, row in enumerate(results):
-                st.subheader(f"Result #{i+1} (Similarity Distance: {row.distCol:.4f})")
-                st.write(f"**Category:** {row.category}")
+            for i, doc_index in enumerate(top_indices):
+                # Get the result from the pandas DataFrame
+                result = df_app.iloc[doc_index]
+                similarity_score = similarities[doc_index]
+                
+                st.subheader(f"Result #{i+1} (Similarity Score: {similarity_score:.4f})")
+                st.write(f"**Category:** {result['category']}")
                 with st.expander("Click to read the full article"):
-                    st.write(row.article)
+                    st.write(result['article'])
                 st.markdown("---")
     else:
         st.warning("Please enter some text to search.")
 
+# --- Data Exploration Section ---
 st.header("Explore the Dataset")
+
 st.subheader("Interactive Chart: Distribution of Articles by Cluster")
 cluster_counts = df_app['cluster_id'].value_counts().reset_index()
 cluster_counts.columns = ['Cluster ID', 'Number of Articles']
